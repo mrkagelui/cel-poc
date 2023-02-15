@@ -9,6 +9,8 @@ import (
 
 	"github.com/google/cel-go/cel"
 	"github.com/google/cel-go/ext"
+	expr "google.golang.org/genproto/googleapis/api/expr/v1alpha1"
+	"google.golang.org/protobuf/proto"
 )
 
 type Txn struct {
@@ -18,26 +20,6 @@ type Txn struct {
 	Amount     float64
 	RiskScore  int
 	CustomData any
-}
-
-type customRule struct {
-	name string
-	ast  *cel.Ast
-}
-
-// pretend we have a DB
-type database []customRule
-
-func (d *database) save(rules []customRule) {
-	*d = rules
-}
-
-func (d *database) get() []customRule {
-	return *d
-}
-
-func connectDB() *database {
-	return &database{}
 }
 
 func main() {
@@ -117,9 +99,18 @@ func userSetRules(env *cel.Env, db *database) error {
 		if outType := ast.OutputType(); !reflect.DeepEqual(outType, cel.BoolType) {
 			return fmt.Errorf("wrong output type: %v", outType)
 		}
+		exp, err := cel.AstToCheckedExpr(ast)
+		if err != nil {
+			return fmt.Errorf("to checked exp: %v", err)
+		}
+		b, err := proto.Marshal(exp)
+		if err != nil {
+			return fmt.Errorf("proto marshal: %v", err)
+		}
 		customRules[i] = customRule{
-			name: r.name,
-			ast:  ast,
+			name:  r.name,
+			rule:  r.content,
+			bytes: b,
 		}
 	}
 
@@ -138,9 +129,15 @@ func assess(env *cel.Env, db *database, txn Txn) {
 		go func(r customRule) {
 			defer wg.Done()
 
-			prg, err := env.Program(r.ast)
+			exp := new(expr.CheckedExpr)
+			if err := proto.Unmarshal(r.bytes, exp); err != nil {
+				log.Println("proto unmarshal", err)
+				return
+			}
+			prg, err := env.Program(cel.CheckedExprToAst(exp))
 			if err != nil {
 				log.Println("build", r.name, err)
+				return
 			}
 			out, det, err := prg.Eval(map[string]any{"txn": txn})
 			if err != nil {
