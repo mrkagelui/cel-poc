@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"reflect"
@@ -14,14 +15,19 @@ import (
 )
 
 type Txn struct {
-	Name       string
-	Type       string
-	Currency   string
-	Amount     float64
-	RiskScore  int
-	CustomData map[string]any
-	Aggregates map[string]float64
+	Name          string
+	Type          string
+	Currency      string
+	Amount        float64
+	RiskScore     int
+	CustomData    CustomData
+	CustomBools   map[string]bool
+	CustomFloats  map[string]float64
+	CustomStrings map[string]string
+	Aggregates    map[string]float64
 }
+
+type CustomData map[string]any
 
 func main() {
 	env, err := cel.NewEnv(
@@ -29,14 +35,13 @@ func main() {
 		cel.Variable("txn", cel.ObjectType("main.Txn")),
 	)
 	if err != nil {
-		log.Panicln(err)
+		log.Fatal(err)
 	}
 
 	db := connectDB()
 
 	if err := userSetRules(env, db); err != nil {
-		log.Println("user set rules")
-		panic(err)
+		log.Fatal("user set rules", err)
 	}
 
 	txns := []Txn{
@@ -49,24 +54,38 @@ func main() {
 			CustomData: nil,
 		},
 		{
-			Name:       "high risk VA large txn",
-			Type:       "VA",
-			Currency:   "IDR",
-			Amount:     100000000,
-			RiskScore:  7,
-			CustomData: nil,
+			Name:      "high risk VA large txn",
+			Type:      "VA",
+			Currency:  "IDR",
+			Amount:    100000000,
+			RiskScore: 7,
+			CustomData: map[string]any{
+				"is_vip": true,
+			},
 		},
 		{
-			Name:       "low risk VA large txn",
-			Type:       "VA",
-			Currency:   "IDR",
-			Amount:     100000000,
-			RiskScore:  2,
-			CustomData: nil,
+			Name:      "low risk VA large txn",
+			Type:      "VA",
+			Currency:  "IDR",
+			Amount:    100000000,
+			RiskScore: 2,
+			CustomData: map[string]any{
+				"vip_level": 7,
+			},
 		},
 	}
 	for _, txn := range txns {
-		assess(env, db, txn)
+		b, err := json.Marshal(txn)
+		if err != nil {
+			panic(err)
+		}
+
+		// to simulate the request / message parsing
+		var t Txn
+		if err := json.Unmarshal(b, &t); err != nil {
+			panic(err)
+		}
+		assess(env, db, t)
 	}
 }
 
@@ -95,6 +114,18 @@ func userSetRules(env *cel.Env, db *database) error {
 			content: `txn.Type == 'VA'
 						&& txn.Currency == 'IDR'
 						&& txn.Aggregates["failed_txn_past_month"] > 7.0`,
+		},
+		{
+			name: "IDR VA not VIP",
+			content: `txn.Type == 'VA'
+						&& txn.Currency == 'IDR'
+						&& !txn.CustomBools["is_vip"]`,
+		},
+		{
+			name: "IDR VA super VIP",
+			content: `txn.Type == 'VA'
+						&& txn.Currency == 'IDR'
+						&& txn.CustomFloats["vip_level"] > 5.0`,
 		},
 	}
 
@@ -127,6 +158,7 @@ func userSetRules(env *cel.Env, db *database) error {
 }
 
 func assess(env *cel.Env, db *database, txn Txn) {
+	txn = categorizeCustomData(txn)
 	txn = precalculate(db, txn)
 
 	log.Println("results for:", txn.Name)
@@ -177,6 +209,33 @@ func assess(env *cel.Env, db *database, txn Txn) {
 
 	wg.Wait()
 	log.Println()
+}
+
+func categorizeCustomData(txn Txn) Txn {
+	result := txn
+	if result.CustomBools == nil {
+		result.CustomBools = make(map[string]bool, len(txn.CustomData))
+	}
+	if result.CustomFloats == nil {
+		result.CustomFloats = make(map[string]float64, len(txn.CustomData))
+	}
+	if result.CustomStrings == nil {
+		result.CustomStrings = make(map[string]string, len(txn.CustomData))
+	}
+	for k, v := range txn.CustomData {
+		switch v.(type) {
+		case int:
+			result.CustomFloats[k] = float64(v.(int))
+		case float64:
+			result.CustomFloats[k] = v.(float64)
+		case bool:
+			result.CustomBools[k] = v.(bool)
+		case string:
+			result.CustomStrings[k] = v.(string)
+		}
+		// other types are not supported
+	}
+	return result
 }
 
 func precalculate(db *database, txn Txn) Txn {
