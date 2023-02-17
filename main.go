@@ -19,7 +19,8 @@ type Txn struct {
 	Currency   string
 	Amount     float64
 	RiskScore  int
-	CustomData any
+	CustomData map[string]any
+	Aggregates map[string]float64
 }
 
 func main() {
@@ -34,7 +35,8 @@ func main() {
 	db := connectDB()
 
 	if err := userSetRules(env, db); err != nil {
-		log.Panicln("user set rules", err)
+		log.Println("user set rules")
+		panic(err)
 	}
 
 	txns := []Txn{
@@ -88,6 +90,12 @@ func userSetRules(env *cel.Env, db *database) error {
 						&& txn.Amount >= 2000000.0
 						&& txn.RiskScore >= 7`,
 		},
+		{
+			name: "IDR VA Aggregate",
+			content: `txn.Type == 'VA'
+						&& txn.Currency == 'IDR'
+						&& txn.Aggregates["failed_txn_past_month"] > 7.0`,
+		},
 	}
 
 	customRules := make([]customRule, len(rules))
@@ -119,6 +127,8 @@ func userSetRules(env *cel.Env, db *database) error {
 }
 
 func assess(env *cel.Env, db *database, txn Txn) {
+	txn = precalculate(db, txn)
+
 	log.Println("results for:", txn.Name)
 	rules := db.get()
 
@@ -167,4 +177,12 @@ func assess(env *cel.Env, db *database, txn Txn) {
 
 	wg.Wait()
 	log.Println()
+}
+
+func precalculate(db *database, txn Txn) Txn {
+	if txn.Aggregates == nil {
+		txn.Aggregates = make(map[string]float64)
+	}
+	txn.Aggregates["failed_txn_past_month"] = db.getSomeAggregate(txn)
+	return txn
 }
